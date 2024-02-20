@@ -31,14 +31,27 @@ namespace Lucifer {
          * @return зашифрованное сообщение
          */
         BaseTools::ByteArray encrypt(const BaseTools::ByteArray& message);
-
+        /**
+         * Функция для зашифровки сообщения
+         * @param message - сообщение, которое требуется зашифровать
+         * @param threadCount - кол-во потоков, должно быть 2 и более
+         * @return зашифрованное сообщение
+         */
         BaseTools::ByteArray encrypt(const BaseTools::ByteArray& message, int threadCount);
+
         /**
          * Функция для расшифровки сообщения
          * @param message - сообщение, которое трубется расшифровать
          * @return расшифрованное сообщение
          */
         BaseTools::ByteArray decrypt(const BaseTools::ByteArray& message);
+        /**
+         * Функция для расшифровки сообщения
+         * @param message - сообщение, которое трубется расшифровать
+         * @param threadCount - кол-во потоков, должно быть 2 и более
+         * @return расшифрованное сообщение
+         */
+        BaseTools::ByteArray decrypt(const BaseTools::ByteArray& message, int threadCount);
     private:
         std::unique_ptr<Impl_Cryptographer> pImpl;
     };

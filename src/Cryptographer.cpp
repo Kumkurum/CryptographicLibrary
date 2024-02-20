@@ -37,5 +37,9 @@ namespace Lucifer {
         return  pImpl->decrypt(message);
     }
 
+    BaseTools::ByteArray Cryptographer::decrypt(const BaseTools::ByteArray &message, int threadCount) {
+        return  pImpl->decrypt(message, threadCount);
+    }
+
 
 } // namespace Namespace

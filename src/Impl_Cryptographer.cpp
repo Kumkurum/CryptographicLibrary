@@ -3,10 +3,13 @@
 //
 
 #include "Impl_Cryptographer.h"
-#include <memory>
 #include <vector>
 #include <thread>
 #include <BaseTools/Debug.h>
+#include <math.h>
+#ifndef NDEBUG
+#include <assert.h>
+#endif
 namespace Lucifer {
     using namespace BaseTools;
 
@@ -178,7 +181,7 @@ namespace Lucifer {
             row<<=1;
             row |= bits[start-5];
 
-            int column( (bits._bits & tmpMask)>>(start-4));
+            int column(static_cast<int>((bits._bits & tmpMask)>>(start-4)));
             tmpMask>>=6;
             start-=6;
             afterSBlocks._bits |=uint64_t(sBlocks[i][row][column])<<4*(7 - i);
@@ -268,6 +271,81 @@ namespace Lucifer {
         return cryptByteArray;
     }
 
+    size_t getSizePart(size_t size, int threadCount){
+        auto sizePartMsg{static_cast<size_t>(ceil(static_cast<double>(size) / threadCount))};
+        int remainder = sizePartMsg % 8;
+        return remainder ? sizePartMsg + 8 - remainder : sizePartMsg;
+    }
+
+    int Impl_Cryptographer::getZeroChar(BitSet64 backBlock){
+        swapMsg(backBlock);
+        BitSet64 l0{backBlock._bits >> 32};
+        BitSet64 r0{(backBlock._bits << 32) >> 32};
+        for (auto i{15}; i >= 0; --i) {
+            uint64_t tmpR0{r0._bits};
+            expandPart(r0);
+            BitSet64 round(r0._bits ^ _keyRound[i]._bits);
+            r0._bits = sBlock(round)._bits ^ l0._bits;
+            l0._bits = tmpR0;
+        }
+        BitSet64 cryptPart{r0._bits << 32 | l0._bits};
+        finishSwap(cryptPart);
+        backBlock = cryptPart;
+        int zeroChar{0};
+        for(auto i {7}; i >=0; --i){
+            if(backBlock._bits>>(56) != 0)
+                break;
+            ++zeroChar;
+            backBlock._bits<<=8;
+        }
+        return zeroChar;
+    }
+
+    BaseTools::ByteArray Impl_Cryptographer::decrypt(const ByteArray &message, int threadCount) {
+        std::unique_ptr<std::thread> threadPool[threadCount];
+#ifndef NDEBUG
+        assert(threadCount > 1 && "Число потоков не может быть меньше 2");
+#endif
+        auto threadDecrypt = [this](std::byte *data, std::byte *encryptMsg, size_t size){
+            auto parts = getParts(data, size);
+            decryptBlocks(parts);
+            BaseTools::ByteArray cryptByteArray{size};
+            char* ptr = reinterpret_cast<char*>(encryptMsg);
+            for(auto i{0}; i < parts.size(); ++i){
+                parts[i].toChar(ptr);
+                ptr+=8;
+            }
+        };
+        auto threadDecryptLastBlock = [this](std::byte *data, std::byte *encryptMsg, size_t size){
+            auto parts = getParts(data, size);
+            decryptBlocks(parts);
+            char* ptr = reinterpret_cast<char*>(encryptMsg);
+            for(auto i{0}; i < parts.size() - 1; ++i){
+                parts[i].toChar(ptr);
+                ptr+=8;
+            }
+            BitSet64 backBlock{parts.back()._bits};
+            lastBlockToChar(backBlock, ptr);
+        };
+        //что бы не перевыделять память сразу нахожу весь РЕАЛЬНЫЙ размер сообщения, т.к если сообщение не кратно 8, то добивается нулями
+        //ну и эти нули будут в последнем блоке впереди сообщения, их я и обрезаю методом lastBlockToChar() а их колличество getZeroChar
+        ByteArray decryptMsg{message.size()  -    getZeroChar({message.data() + (message.size() - 8), 8})};
+        auto sizePartMsg{getSizePart(message.size(), threadCount)};
+        threadPool[threadCount - 1] = std::make_unique<std::thread>(threadDecryptLastBlock,
+                                                                    message.data() + sizePartMsg * (threadCount - 1),
+                                                                    decryptMsg.data() + sizePartMsg * (threadCount - 1),
+                                                                    message.size() - (threadCount - 1 ) * sizePartMsg);
+        for(auto i{0}; i < (threadCount - 1); ++i)
+            threadPool[i] = std::make_unique<std::thread>(threadDecrypt,
+                                                          message.data() + sizePartMsg * i,
+                                                          decryptMsg.data() + sizePartMsg * i,
+                                                          sizePartMsg);
+        for(auto i{0}; i < threadCount; ++i)
+            threadPool[i]->join();
+        return decryptMsg;
+    }
+
+
     BaseTools::ByteArray Impl_Cryptographer::encrypt(const ByteArray &message) {
         auto parts = getParts(message.data(), message.size());
         cryptBlocks(parts);
@@ -282,23 +360,33 @@ namespace Lucifer {
 
     BaseTools::ByteArray Impl_Cryptographer::encrypt(const ByteArray &message, int threadCount) {
         std::unique_ptr<std::thread> threadPool[threadCount];
-        if(threadCount > 1){
-            auto sizePartMsg{ message.size() / 8 / threadCount};
-            auto threadEncrypt = [this](std::byte *data, size_t size){
-                auto parts = getParts(data, size);
-                cryptBlocks(parts);
-                BaseTools::ByteArray cryptByteArray{' ',parts.size() * 8};
-                char* ptr = reinterpret_cast<char*>(cryptByteArray.data());
-                for(auto i{0}; i < parts.size(); ++i){
-                    parts[i].toChar(ptr);
-                    ptr+=8;
-                }
-                return cryptByteArray;
-            };
-            for(auto i{0}; i < threadCount; ++i)
-                threadPool[i] = std::make_unique<std::thread>(threadEncrypt,message.data(), message.size());
-            for(auto i{0}; i < threadCount; ++i)
-                threadPool[i]->join();
-        }
+#ifndef NDEBUG
+        assert(threadCount > 1 && "Число потоков не может быть меньше 2" );
+#endif
+        auto sizePartMsg{getSizePart(message.size(), threadCount)};
+
+        auto threadEncrypt = [this](std::byte *data, std::byte *encryptMsg, size_t size){
+            auto parts = getParts(data, size);
+            cryptBlocks(parts);
+            char* ptr = reinterpret_cast<char*>(encryptMsg);
+            for(auto i{0}; i < parts.size(); ++i){
+                parts[i].toChar(ptr);
+                ptr+=8;
+            }
+        };
+        ByteArray encryptMsg{getSizePart(message.size(), 1)};
+        threadPool[threadCount - 1] = std::make_unique<std::thread>(threadEncrypt,
+                                                                    message.data() + sizePartMsg * (threadCount - 1),
+                                                                    encryptMsg.data() + sizePartMsg * (threadCount - 1),
+                                                                    message.size() - (threadCount - 1 ) * sizePartMsg);
+        for(auto i{0}; i < (threadCount - 1); ++i)
+            threadPool[i] = std::make_unique<std::thread>(threadEncrypt,
+                                                          message.data() + sizePartMsg * i,
+                                                          encryptMsg.data() + sizePartMsg * i,
+                                                          sizePartMsg);
+        for(auto i{0}; i < threadCount; ++i)
+            threadPool[i]->join();
+        return encryptMsg;
     }
+
 }
